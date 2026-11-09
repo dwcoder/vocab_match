@@ -8,6 +8,18 @@ The screen shows two columns of bubbles: foreign words on one side and their Eng
   <img src="docs/screenshot.png" alt="A game in progress: two columns of word bubbles with a timer and score above them" width="300">
 </p>
 
+<p align="center">
+  <a href="https://github.com/dwcoder/vocab_match/releases/latest">
+    <img src="https://img.shields.io/github/v/release/dwcoder/vocab_match?label=Download%20for%20Android&logo=android&logoColor=white&color=3DDC84&style=for-the-badge" alt="Download for Android">
+  </a>
+</p>
+
+## Install on Android
+
+1. On your phone, tap the **Download for Android** button above. This opens the latest release. Scroll down to **Assets** and tap the `.apk` file (for example `vocab-match-0.1.0.apk`) to download it.
+2. Open the downloaded file. Android will warn that the app is not from the Play Store and ask you to allow installs from your browser or file manager. Allow it, then go back and tap **Install**.
+3. To update later, download and install the new version the same way. Your word list is kept.
+
 ## Features
 
 - **Your own word list.** Add, edit and search words in the app, or upload a CSV file (column A the foreign word, column B the English meaning). A word can have more than one meaning. The list can also be downloaded as a CSV.
@@ -52,3 +64,7 @@ Each platform has its own build command. See the linked Flet guide for signing a
 | Linux | `uv run flet build linux -v` | [Linux Packaging Guide](https://flet.dev/docs/publish/linux/) |
 | Windows | `uv run flet build windows -v` | [Windows Packaging Guide](https://flet.dev/docs/publish/windows/) |
 | Web | `uv run flet build web -v` | [Web Packaging Guide](https://flet.dev/docs/publish/web/) |
+
+### Android release builds
+
+`./build_apk.sh VERSION` (for example `./build_apk.sh 0.1.0`) builds a signed, size-optimised APK for arm64 phones and saves it as `build/apk/vocab-match-VERSION.apk`. It asks for the keystore password and uses `~/keys/vocab-match.jks` unless `KEYSTORE` is set. The Android build number is worked out from the version (major × 10000 + minor × 100 + patch), so each release just needs a higher version than the last.

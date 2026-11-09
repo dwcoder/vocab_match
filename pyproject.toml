@@ -29,7 +29,7 @@ pythonpath = ["src"]
 
 [tool.flet]
 desktop_flavor = "full"    # Change to "full" to use flet-audio and flet-video
-org = "com.mycompany"
+org = "io.github.dwcoder"
 product = "vocab-match"
 company = "Flet"
 copyright = "Copyright (C) 2023-2026 by Flet"
