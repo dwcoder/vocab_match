@@ -4,6 +4,8 @@ A small vocabulary practice game, inspired by the word-matching bubbles in Duoli
 
 The screen shows two columns of bubbles: foreign words on one side and their English meanings on the other. Tap a word, then tap its meaning. A correct pair turns green and is replaced by a new one; a wrong pair flashes red. Match as many pairs as you can before the timer runs out (30 seconds or 1 minute).
 
+![](./src/assets/screenshot.png)
+
 ## Features
 
 - **Your own word list.** Add, edit and search words in the app, or upload a CSV file (column A the foreign word, column B the English meaning). A word can have more than one meaning. The list can also be downloaded as a CSV.
