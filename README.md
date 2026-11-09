@@ -1,6 +1,6 @@
 # Vocabulary Match
 
-A small vocabulary practice game, inspired by the word-matching bubbles in Duolingo.
+A small vocabulary practice game, inspired by the word-matching bubbles in Duolingo and other language apps, but with the benefit of controlling the list of words you want to focus on.
 
 The screen shows two columns of bubbles: foreign words on one side and their English meanings on the other. Tap a word, then tap its meaning. A correct pair turns green and is replaced by a new one; a wrong pair flashes red. Match as many pairs as you can before the timer runs out (30 seconds or 1 minute).
 
@@ -19,6 +19,10 @@ The screen shows two columns of bubbles: foreign words on one side and their Eng
 1. On your phone, tap the **Download for Android** button above. This opens the latest release. Scroll down to **Assets** and tap the `.apk` file (for example `vocab-match-0.1.0.apk`) to download it.
 2. Open the downloaded file. Android will warn that the app is not from the Play Store and ask you to allow installs from your browser or file manager. Allow it, then go back and tap **Install**.
 3. To update later, download and install the new version the same way. Your word list is kept.
+ 
+## Install on iPhone
+
+Apple makes things a little harder, so right now you have to build it yourself using xcode, and sign it using your own Apple ID (you also have to repeat this weekly if you don't have a developer account).
 
 ## Features
 
@@ -67,4 +71,4 @@ Each platform has its own build command. See the linked Flet guide for signing a
 
 ### Android release builds
 
-`./build_apk.sh` builds a signed, size-optimised APK for arm64 phones and saves it as `build/apk/vocab-match-VERSION.apk`, using the version in `pyproject.toml`. For a new release, raise that version and commit first: the script stops if the version is already tagged on an earlier commit, and after the build it prints the `git tag` commands to run. It asks for the keystore password and uses `~/keys/vocab-match.jks` unless `KEYSTORE` is set. The Android build number is worked out from the version (major × 10000 + minor × 100 + patch), so each release just needs a higher version than the last.
+`./build_apk.sh` builds a signed, size-optimised APK for arm64 phones and saves it as `build/apk/vocab-match-VERSION.apk`, using the version in `pyproject.toml`. For a new release, raise that version and commit first: the script stops if the version is already tagged on an earlier commit, and after the build it prints the `git tag` commands to run.
