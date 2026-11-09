@@ -67,4 +67,4 @@ Each platform has its own build command. See the linked Flet guide for signing a
 
 ### Android release builds
 
-`./build_apk.sh VERSION` (for example `./build_apk.sh 0.1.0`) builds a signed, size-optimised APK for arm64 phones and saves it as `build/apk/vocab-match-VERSION.apk`. It asks for the keystore password and uses `~/keys/vocab-match.jks` unless `KEYSTORE` is set. The Android build number is worked out from the version (major × 10000 + minor × 100 + patch), so each release just needs a higher version than the last.
+`./build_apk.sh` builds a signed, size-optimised APK for arm64 phones and saves it as `build/apk/vocab-match-VERSION.apk`, using the version in `pyproject.toml`. For a new release, raise that version and commit first: the script stops if the version is already tagged on an earlier commit, and after the build it prints the `git tag` commands to run. It asks for the keystore password and uses `~/keys/vocab-match.jks` unless `KEYSTORE` is set. The Android build number is worked out from the version (major × 10000 + minor × 100 + patch), so each release just needs a higher version than the last.

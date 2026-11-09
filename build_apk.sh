@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Build a signed release APK for arm64 Android phones.
 #
-# Usage:   ./build_apk.sh VERSION
-# Example: ./build_apk.sh 0.1.0
+# Usage: ./build_apk.sh
 #
-# VERSION is what users see (match it to the git tag, v0.1.0).
-# The build number (Android's versionCode) is worked out from it as
+# The version comes from pyproject.toml. Before a new release, change it
+# there and commit. If a git tag v<version> already exists on an earlier
+# commit, that version has been released and the script stops. If the tag is
+# on the current commit, this is a rebuild of that release and it goes ahead.
+# After a build of a new version it prints the commands to tag the release.
+#
+# The build number (Android's versionCode) is worked out from the version as
 # major * 10000 + minor * 100 + patch, so 0.1.0 -> 100 and 2.1.0 -> 20100.
 # Android only installs an APK as an update if this number is higher than
 # the installed one, which holds as long as each release has a higher
@@ -18,17 +22,23 @@
 
 set -euo pipefail
 
-if [[ $# -ne 1 ]]; then
-    echo "Usage: $0 VERSION   (for example: $0 0.1.0)" >&2
+if [[ $# -ne 0 ]]; then
+    echo "Usage: $0   (the version is read from pyproject.toml)" >&2
     exit 1
 fi
 
-version=$1
+cd "$(dirname "$0")"
+
 keystore=${KEYSTORE:-$HOME/keys/vocab-match.jks}
 key_alias=${KEY_ALIAS:-upload}
 
+# ---------- Version ----------
+
+version=$(uv run --quiet python -c \
+    'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+
 if [[ ! $version =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-    echo "VERSION must look like 1.2.3, got '$version'" >&2
+    echo "The version in pyproject.toml must look like 1.2.3, got '$version'" >&2
     exit 1
 fi
 # 10# reads the parts as decimal, so a part like "08" isn't taken as octal.
@@ -41,20 +51,42 @@ if (( minor > 99 || patch > 99 )); then
 fi
 build_number=$((major * 10000 + minor * 100 + patch))
 if (( build_number < 1 )); then
-    echo "Version must be above 0.0.0" >&2
+    echo "The version must be above 0.0.0" >&2
     exit 1
 fi
+
+# ---------- Git checks ----------
+
+tag=v$version
+head=$(git rev-parse HEAD)
+new_release=true
+if tag_commit=$(git rev-parse --verify --quiet "refs/tags/$tag^{commit}"); then
+    if [[ $tag_commit != "$head" ]]; then
+        echo "$tag is already tagged on an earlier commit ($(git log -1 --format='%h %s' "$tag_commit"))." >&2
+        echo "Change the version number in pyproject.toml first." >&2
+        exit 1
+    fi
+    new_release=false
+    echo "$tag is already tagged on this commit; rebuilding that release."
+fi
+
+if [[ -n $(git status --porcelain) ]]; then
+    echo "Warning: there are uncommitted changes. They will be in the APK but not in the tagged commit." >&2
+fi
+
+unpushed=0
+if git rev-parse --verify --quiet '@{upstream}' >/dev/null; then
+    unpushed=$(git rev-list --count '@{upstream}..HEAD')
+fi
+
 if [[ ! -f $keystore ]]; then
     echo "Keystore not found: $keystore" >&2
     exit 1
 fi
 
-cd "$(dirname "$0")"
+# ---------- Build ----------
 
-project_version=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
-if [[ $project_version != "$version" ]]; then
-    echo "Warning: pyproject.toml says version $project_version, building $version." >&2
-fi
+echo "Building version $version (build number $build_number)."
 
 if [[ -z ${FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD:-} ]]; then
     read -rsp "Keystore password: " FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD
@@ -75,6 +107,17 @@ uv run flet build apk \
 
 output=build/apk/vocab-match-$version.apk
 cp build/apk/vocab-match.apk "$output"
+
 echo
 echo "Built $output ($(du -h "$output" | cut -f1)), build number $build_number."
-echo "Upload that file to the v$version release."
+echo
+echo "Next steps:"
+if (( unpushed > 0 )); then
+    echo "  git push"
+fi
+if $new_release; then
+    echo "  git tag -a $tag -m \"Version $version\""
+    echo "  git push origin $tag"
+fi
+echo "  Then upload $output to the $tag release on GitHub."
+echo "  To install on a phone connected by USB: adb install -r $output"
