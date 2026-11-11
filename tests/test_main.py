@@ -346,7 +346,7 @@ class TestCapitals:
     def test_import_ignores_capitals(self, conn):
         vocab_db.add_meanings(conn, "Hola", ["Hello"])
         result = vocab_db.import_text(conn, "hola,hello\nHOLA,Hi\n")
-        assert result == {"added": 1, "skipped": 1, "errors": []}
+        assert result == {"added": 1, "skipped": 1, "errors": [], "removed": 0}
         assert vocab_db.load_words(conn) == {"Hola": ("Hello", "Hi")}
 
     def test_import_file_with_mixed_capitals(self, conn):
@@ -427,6 +427,48 @@ class TestCapitals:
         assert vocab_db.add_meanings(conn, "HOLA", ["hi"]) == 0
         assert len(vocab_db.load_words(conn)) == 2
         conn.close()
+
+
+class TestDeleteAll:
+    def test_removes_everything_but_settings(self, conn):
+        vocab_db.seed_if_empty(conn, {"Hola": ("Hello",), "Banco": ("Bank", "Bench")})
+        vocab_db.record_guess(conn, "Hola", True)
+        vocab_db.set_setting(conn, "choice_method", "time")
+        assert vocab_db.delete_all_words(conn) == 2
+        assert vocab_db.load_words(conn) == {}
+        assert conn.execute("SELECT COUNT(*) FROM meanings").fetchone()[0] == 0
+        assert vocab_db.get_setting(conn, "choice_method") == "time"
+
+    def test_starter_list_not_loaded_again(self, tmp_path):
+        path = str(tmp_path / "v.db")
+        conn = vocab_db.connect(path)
+        vocab_db.seed_if_empty(conn, {"Hola": ("Hello",)})
+        vocab_db.delete_all_words(conn)
+        conn.close()
+        conn = vocab_db.connect(path)
+        vocab_db.seed_if_empty(conn, {"Hola": ("Hello",)})
+        assert vocab_db.load_words(conn) == {}
+        conn.close()
+
+    def test_existing_list_is_marked_as_seeded(self, conn):
+        vocab_db.add_meanings(conn, "Gato", ["Cat"])
+        vocab_db.seed_if_empty(conn, {"Hola": ("Hello",)})
+        vocab_db.delete_all_words(conn)
+        vocab_db.seed_if_empty(conn, {"Hola": ("Hello",)})
+        assert vocab_db.load_words(conn) == {}
+
+    def test_clean_import_replaces_the_list(self, conn):
+        vocab_db.add_meanings(conn, "Gato", ["Cat"])
+        vocab_db.add_meanings(conn, "Perro", ["Dog"])
+        result = vocab_db.import_text(conn, "Hola,Hello\nbad line\n", start_clean=True)
+        assert result == {"added": 1, "skipped": 0, "errors": ["Line 2: bad line"], "removed": 2}
+        assert vocab_db.load_words(conn) == {"Hola": ("Hello",)}
+
+    def test_clean_import_of_unreadable_file_keeps_the_list(self, conn):
+        vocab_db.add_meanings(conn, "Gato", ["Cat"])
+        result = vocab_db.import_text(conn, "nothing\n\n", start_clean=True)
+        assert result["removed"] == 0
+        assert vocab_db.load_words(conn) == {"Gato": ("Cat",)}
 
 
 class TestDeleteWord:
@@ -641,7 +683,7 @@ class TestSettings:
 class TestImportText:
     def test_csv_rows(self, conn):
         result = vocab_db.import_text(conn, "Hola,Hello\nBanco,Bank\nBanco,Bench\n")
-        assert result == {"added": 3, "skipped": 0, "errors": []}
+        assert result == {"added": 3, "skipped": 0, "errors": [], "removed": 0}
         assert vocab_db.load_words(conn) == {
             "Banco": ("Bank", "Bench"),
             "Hola": ("Hello",),
@@ -654,7 +696,7 @@ class TestImportText:
 
     def test_strips_whitespace_and_skips_blank_lines(self, conn):
         result = vocab_db.import_text(conn, "  Hola , Hello \n\n , \n")
-        assert result == {"added": 1, "skipped": 0, "errors": []}
+        assert result == {"added": 1, "skipped": 0, "errors": [], "removed": 0}
         assert vocab_db.load_words(conn) == {"Hola": ("Hello",)}
 
     def test_quoted_cells_with_commas(self, conn):
@@ -664,7 +706,7 @@ class TestImportText:
     def test_skips_duplicates_already_stored_and_within_file(self, conn):
         vocab_db.add_meanings(conn, "Hola", ["Hello"])
         result = vocab_db.import_text(conn, "Hola,Hello\nGato,Cat\nGato,Cat\n")
-        assert result == {"added": 1, "skipped": 2, "errors": []}
+        assert result == {"added": 1, "skipped": 2, "errors": [], "removed": 0}
 
     def test_reports_bad_lines_with_line_numbers(self, conn):
         text = "Hola,Hello\nonlyone\nGato,\n|Cat\nPerro,Dog\n"
@@ -1570,6 +1612,85 @@ class TestVocabScreen:
             run_tasks(page)
             assert len({b.data for b in left}) == main.ON_SCREEN
 
+    def delete_all_button(self, page):
+        return find_button(page, "Delete all words")
+
+    def test_delete_all_without_warning_for_new_users(self, page):
+        self.open(page)
+        self.delete_all_button(page).on_click(None)
+        assert page.dialog is None
+        assert main.WORDS == {}
+        assert table_words(page) == []
+        assert (
+            f"Deleted all {len(main.SEED_WORDS)} word(s). Add words or upload a list to play."
+        ) in texts(page)
+
+    def big_list(self, db_file, count=main.NEW_USER_WORDS):
+        conn = vocab_db.connect(str(db_file))
+        vocab_db.set_setting(conn, "seeded", "1")
+        for i in range(count):
+            vocab_db.add_meanings(conn, f"Palabra{i}", [f"Word{i}"])
+        conn.commit()
+        conn.close()
+        page = FakePage()
+        main.main(page)
+        return page
+
+    def test_delete_all_warns_from_50_words(self, db_file):
+        page = self.big_list(db_file)
+        self.open(page)
+        self.delete_all_button(page).on_click(None)
+        assert page.dialog.title.value == "Delete all 50 words?"
+        warning = [c.value for c in page.dialog.content.controls]
+        assert any("can't be undone" in t for t in warning)
+        assert any("Download list" in t for t in warning)
+        assert len(main.WORDS) == 50
+
+    def test_cancel_delete_all_keeps_the_list(self, db_file):
+        page = self.big_list(db_file)
+        self.open(page)
+        self.delete_all_button(page).on_click(None)
+        self.dialog_click(page, "Cancel")
+        assert page.dialog is None
+        assert len(main.WORDS) == 50
+
+    def test_confirm_delete_all(self, db_file):
+        page = self.big_list(db_file)
+        self.open(page)
+        self.delete_all_button(page).on_click(None)
+        self.dialog_click(page, "Delete all")
+        assert page.dialog is None
+        assert main.WORDS == {}
+        conn = vocab_db.connect(str(db_file))
+        assert vocab_db.count_words(conn) == 0
+        conn.close()
+
+    def test_after_delete_all_games_ask_for_words(self, page):
+        self.open(page)
+        self.delete_all_button(page).on_click(None)
+        click(page, "Back to menu")
+        click(page, "Start 30s game")
+        assert heading(page) == "Vocabulary Match"  # still on the menu
+        assert "Add at least 6 words to play. Your list has 0." in texts(page)
+        assert page.tasks == []  # no countdown started
+
+    def test_empty_list_stays_empty_after_restart(self, page):
+        self.open(page)
+        self.delete_all_button(page).on_click(None)
+        again = FakePage()
+        main.main(again)
+        assert main.WORDS == {}
+        assert heading(again) == "Vocabulary Match"
+
+    def test_menu_message_cleared_when_returning(self, page):
+        self.open(page)
+        self.delete_all_button(page).on_click(None)
+        click(page, "Back to menu")
+        click(page, "Start 30s game")
+        click(page, "Vocab management")
+        click(page, "Back to menu")
+        assert not any(t.startswith("Add at least") for t in texts(page) if t)
+
     def test_reopening_resets_search_and_form(self, page):
         self.open(page)
         self.search(page, "zzz")
@@ -1632,7 +1753,11 @@ class TestUpload:
         click(page, "Upload a vocabulary")
         assert heading(page) == "Upload a vocabulary"
 
-    def pick(self, page, monkeypatch, path):
+    def checkbox(self, page):
+        return find_first(page, ft.Checkbox)
+
+    def pick(self, page, monkeypatch, path, clean=False):
+        """Choose a file. clean sets the "Start clean database" box, if it's shown."""
         class Picked:
             pass
 
@@ -1643,7 +1768,75 @@ class TestUpload:
             return [picked] if path else None
 
         monkeypatch.setattr(page.services[0], "pick_files", pick_files)
+        box = self.checkbox(page)
+        if box.visible:
+            box.value = clean
+            box.on_change(None)
         click(page, "Choose file")
+
+    def page_with_words(self, db_file, count):
+        """Start the app with exactly count words, numbered."""
+        conn = vocab_db.connect(str(db_file))
+        vocab_db.set_setting(conn, "seeded", "1")
+        for i in range(count):
+            vocab_db.add_meanings(conn, f"Palabra{i}", [f"Word{i}"])
+        conn.commit()
+        conn.close()
+        page = FakePage()
+        main.main(page)
+        return page
+
+    def test_clean_box_offered_to_new_users_ticked(self, page):
+        self.open(page)
+        box = self.checkbox(page)
+        assert box.visible and box.value is True
+        assert box.label == "Start clean database"
+        assert any("will be replaced" in t for t in texts(page))
+
+    def test_clean_box_hidden_for_50_or_more_words(self, db_file):
+        page = self.page_with_words(db_file, main.NEW_USER_WORDS)
+        self.open(page)
+        assert not self.checkbox(page).visible
+        assert any("Nothing is removed" in t for t in texts(page))
+
+    def test_clean_box_shown_for_49_words(self, db_file):
+        page = self.page_with_words(db_file, main.NEW_USER_WORDS - 1)
+        self.open(page)
+        assert self.checkbox(page).visible
+
+    def test_unticking_changes_the_note(self, page):
+        self.open(page)
+        box = self.checkbox(page)
+        box.value = False
+        box.on_change(None)
+        assert any("Nothing is removed" in t for t in texts(page))
+        assert not any("will be replaced" in t for t in texts(page))
+
+    def test_clean_upload_replaces_the_list(self, page, monkeypatch, tmp_path):
+        upload = tmp_path / "list.csv"
+        upload.write_text("Nube,Cloud\nHola,Hi\n", encoding="utf-8")
+        self.open(page)
+        self.pick(page, monkeypatch, upload, clean=True)
+        assert main.WORDS == {"Hola": ("Hi",), "Nube": ("Cloud",)}
+        assert (
+            "Started a clean list with 2 pair(s) from the file. "
+            f"Removed the {len(main.SEED_WORDS)} word(s) you had before."
+        ) in texts(page)
+
+    def test_clean_upload_of_unreadable_file_keeps_the_list(self, page, monkeypatch, tmp_path):
+        upload = tmp_path / "list.csv"
+        upload.write_text("nothing useful\n", encoding="utf-8")
+        self.open(page)
+        self.pick(page, monkeypatch, upload, clean=True)
+        assert main.WORDS == main.SEED_WORDS
+
+    def test_box_ticked_again_when_screen_reopens(self, page):
+        self.open(page)
+        box = self.checkbox(page)
+        box.value = False
+        click(page, "Back")
+        click(page, "Upload a vocabulary")
+        assert self.checkbox(page).value is True
 
     def test_imports_file(self, page, monkeypatch, tmp_path):
         upload = tmp_path / "list.csv"
@@ -1670,7 +1863,8 @@ class TestUpload:
             "Could not read 4 line(s): Line 1: a; Line 2: b; Line 3: c"
         )
 
-    def test_screen_says_uploading_adds(self, page):
+    def test_screen_says_uploading_adds(self, db_file):
+        page = self.page_with_words(db_file, main.NEW_USER_WORDS)
         self.open(page)
         assert any("Uploading adds to your list" in t and "Nothing is removed" in t
                    for t in texts(page))

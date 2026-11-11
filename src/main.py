@@ -47,6 +47,9 @@ SEED_WORDS = {
 ON_SCREEN = 5
 # The game needs a full board plus one spare word to replace a matched one.
 MIN_WORDS = ON_SCREEN + 1
+# With fewer words than this we treat the user as new: deleting all words
+# needs no warning, and an upload offers to start a clean list.
+NEW_USER_WORDS = 50
 
 NORMAL = ft.Colors.BLUE_50
 SELECTED = ft.Colors.BLUE_100
@@ -322,6 +325,13 @@ def main(page: ft.Page):
         page.update()
 
     def start_game(seconds):
+        if len(WORDS) < MIN_WORDS:
+            home_message.value = (
+                f"Add at least {MIN_WORDS} words to play. "
+                f"Your list has {len(WORDS)}."
+            )
+            page.update()
+            return
         state["game"] += 1
         gid = state["game"]
         state["limit"] = seconds
@@ -510,6 +520,54 @@ def main(page: ft.Page):
             )
         )
 
+    def ask_delete_all(e=None):
+        count = len(WORDS)
+        if count < NEW_USER_WORDS:
+            # A new user's list: no warning needed.
+            delete_all()
+            return
+        page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                icon=ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color=ft.Colors.RED_700, size=48),
+                title=ft.Text(f"Delete all {count} words?", text_align=ft.TextAlign.CENTER),
+                content=ft.Column(
+                    [
+                        ft.Text(
+                            "This removes every word in your list, with its meanings "
+                            "and all your practice history."
+                        ),
+                        ft.Text(
+                            "It can't be undone.",
+                            weight=ft.FontWeight.BOLD,
+                            color=ft.Colors.RED_700,
+                        ),
+                        ft.Text("To keep a copy, use Download list first."),
+                    ],
+                    tight=True,
+                    spacing=10,
+                ),
+                actions=[
+                    ft.TextButton("Cancel", on_click=lambda e: page.pop_dialog()),
+                    ft.TextButton(
+                        "Delete all",
+                        on_click=lambda e: (page.pop_dialog(), delete_all()),
+                        style=ft.ButtonStyle(color=ft.Colors.RED_700),
+                    ),
+                ],
+            )
+        )
+
+    def delete_all():
+        removed = vocab_db.delete_all_words(conn)
+        reload_words()
+        refresh_table()
+        form.visible = False
+        vocab_message.value = (
+            f"Deleted all {removed} word(s). Add words or upload a list to play."
+        )
+        page.update()
+
     def confirm_delete(word):
         page.pop_dialog()
         vocab_db.delete_word(conn, word)
@@ -588,6 +646,28 @@ def main(page: ft.Page):
     # ---------- Upload a vocabulary screen ----------
 
     upload_message = ft.Text("", size=15)
+    upload_note = ft.Text("", expand=True)
+
+    def update_upload_note(e=None):
+        if clean_checkbox.visible and clean_checkbox.value:
+            upload_note.value = (
+                f"Your current {len(WORDS)} word(s) will be replaced by the words "
+                "in the file."
+            )
+        else:
+            upload_note.value = (
+                "Uploading adds to your list. Your current words, and how well "
+                "you know them, are kept. Nothing is removed."
+            )
+        page.update()
+
+    # Only offered to new users (a short list), and ticked by default.
+    clean_checkbox = ft.Checkbox(
+        label="Start clean database",
+        value=True,
+        visible=False,
+        on_change=update_upload_note,
+    )
 
     async def choose_upload_file(e=None):
         files = await file_picker.pick_files(
@@ -598,14 +678,21 @@ def main(page: ft.Page):
         with open(files[0].path, encoding="utf-8-sig") as f:
             text = f.read()
 
-        result = vocab_db.import_text(conn, text)
+        start_clean = clean_checkbox.visible and clean_checkbox.value
+        result = vocab_db.import_text(conn, text, start_clean=start_clean)
         reload_words()
         refresh_table()
 
-        message = (
-            f"Added {result['added']} new pair(s) to your list. "
-            f"Skipped {result['skipped']} already in it. Nothing was removed."
-        )
+        if result["removed"]:
+            message = (
+                f"Started a clean list with {result['added']} pair(s) from the file. "
+                f"Removed the {result['removed']} word(s) you had before."
+            )
+        else:
+            message = (
+                f"Added {result['added']} new pair(s) to your list. "
+                f"Skipped {result['skipped']} already in it. Nothing was removed."
+            )
         if result["errors"]:
             message += (
                 f" Could not read {len(result['errors'])} line(s): "
@@ -622,11 +709,7 @@ def main(page: ft.Page):
                 content=ft.Row(
                     [
                         ft.Icon(ft.Icons.INFO_OUTLINE, color=ft.Colors.BLUE_700),
-                        ft.Text(
-                            "Uploading adds to your list. Your current words, and "
-                            "how well you know them, are kept. Nothing is removed.",
-                            expand=True,
-                        ),
+                        upload_note,
                     ],
                     spacing=10,
                 ),
@@ -655,6 +738,7 @@ def main(page: ft.Page):
             ft.Text("1. Type the foreign words in column A and their English meanings in column B, one pair per row. No header row."),
             ft.Text("2. Choose File > Save As. Pick the CSV UTF-8 (Comma delimited) type and save it."),
             ft.Text("3. Upload that file with Choose file below."),
+            clean_checkbox,
             ft.Row(
                 [
                     ft.Button("Choose file", on_click=choose_upload_file),
@@ -669,6 +753,9 @@ def main(page: ft.Page):
 
     def show_upload():
         upload_message.value = ""
+        clean_checkbox.visible = 0 < len(WORDS) < NEW_USER_WORDS
+        clean_checkbox.value = True
+        update_upload_note()
         show(view_upload, app_bar=upload_back_bar)
 
     view_vocab = ft.Column(
@@ -680,6 +767,13 @@ def main(page: ft.Page):
                     ft.Button("Add word", on_click=start_add),
                     ft.Button("Upload a vocabulary", on_click=lambda e: show_upload()),
                     ft.Button("Download list", on_click=export_words),
+                    ft.Button(
+                        "Delete all words",
+                        icon=ft.Icons.DELETE_FOREVER_OUTLINED,
+                        color=ft.Colors.RED_700,
+                        icon_color=ft.Colors.RED_700,
+                        on_click=ask_delete_all,
+                    ),
                 ],
                 wrap=True,
                 spacing=10,
@@ -748,6 +842,8 @@ def main(page: ft.Page):
 
     # ---------- Home screen ----------
 
+    home_message = ft.Text("", color=ft.Colors.RED_700, text_align=ft.TextAlign.CENTER)
+
     view_home = ft.Column(
         [
             ft.Text("Vocabulary Match", size=30, weight=ft.FontWeight.BOLD),
@@ -771,6 +867,7 @@ def main(page: ft.Page):
                 on_click=lambda e: show_settings(),
                 width=BUTTON_WIDTH,
             ),
+            home_message,
         ],
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         spacing=20,
@@ -801,6 +898,7 @@ def main(page: ft.Page):
 
     def show_home():
         stop_game()
+        home_message.value = ""
         show(view_home, centred=True)
 
     def show_settings():
@@ -815,7 +913,6 @@ def main(page: ft.Page):
         refresh_table()
         show(view_vocab, across=True, app_bar=back_bar)
 
-    deal()
     show_home()
 
 

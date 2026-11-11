@@ -171,11 +171,31 @@ def sort_key(text):
 
 
 def seed_if_empty(conn, seed):
-    count = conn.execute("SELECT COUNT(*) FROM words").fetchone()[0]
-    if count == 0:
+    """Load the starter list, but only the first time the app ever runs.
+
+    After that an empty list stays empty, so deleting all words sticks.
+    """
+    if get_setting(conn, "seeded") is not None:
+        return
+    if count_words(conn) == 0:
         for word, meanings in seed.items():
             add_meanings(conn, word, meanings)
-        conn.commit()
+    set_setting(conn, "seeded", "1")  # commits
+
+
+def count_words(conn):
+    return conn.execute("SELECT COUNT(*) FROM words").fetchone()[0]
+
+
+def delete_all_words(conn):
+    """Remove every word, meaning and practice history. Settings are kept.
+
+    Returns how many words were removed. Commits.
+    """
+    removed = count_words(conn)
+    conn.execute("DELETE FROM words")  # meanings go too: ON DELETE CASCADE
+    conn.commit()
+    return removed
 
 
 def load_words(conn):
@@ -395,16 +415,25 @@ def _read_pairs(text):
             yield (line_number, word, english)
 
 
-def import_text(conn, text):
+def import_text(conn, text, start_clean=False):
     """Import a CSV list of word,english rows. Duplicate pairs are skipped,
     ignoring capitals.
 
-    Returns a dict with the number added, the number skipped, and any
-    lines that couldn't be read.
+    start_clean removes every word first, so the list is just the file. It
+    only does so if the file has at least one readable pair, so a wrong or
+    empty file never wipes the list. Both happen in one transaction.
+
+    Returns a dict with the number added, the number skipped, any lines that
+    couldn't be read, and how many words were removed by start_clean.
     """
     added = 0
     skipped = 0
     errors = []
+    removed = 0
+
+    if start_clean and any(word is not None for _, word, _ in _read_pairs(text)):
+        removed = count_words(conn)
+        conn.execute("DELETE FROM words")
 
     for line_number, word, english in _read_pairs(text):
         if word is None:
@@ -427,7 +456,7 @@ def import_text(conn, text):
         added += 1
 
     conn.commit()
-    return {"added": added, "skipped": skipped, "errors": errors}
+    return {"added": added, "skipped": skipped, "errors": errors, "removed": removed}
 
 
 def export_csv(conn):
