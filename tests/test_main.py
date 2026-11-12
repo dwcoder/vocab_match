@@ -471,6 +471,67 @@ class TestDeleteAll:
         assert vocab_db.load_words(conn) == {"Gato": ("Cat",)}
 
 
+class TestBackupRestore:
+    def test_round_trip_keeps_everything(self, conn):
+        vocab_db.seed_if_empty(conn, {"Hola": ("Hello",), "Banco": ("Bank", "Bench")})
+        vocab_db.record_guess(conn, "Hola", True, datetime(2026, 11, 7, 9, 0, 0))
+        vocab_db.set_setting(conn, "choice_method", "time")
+        data = vocab_db.backup_bytes(conn)
+
+        other = vocab_db.connect(":memory:")
+        vocab_db.add_meanings(other, "Gato", ["Cat"])
+        other.commit()
+        assert vocab_db.restore_from_bytes(other, data) == 2
+        assert vocab_db.load_words(other) == vocab_db.load_words(conn)
+        assert vocab_db.load_stats(other, "Hola") == vocab_db.load_stats(conn, "Hola")
+        assert vocab_db.get_setting(other, "choice_method") == "time"
+        other.close()
+
+    def test_restored_database_keeps_working(self, conn):
+        vocab_db.add_meanings(conn, "Hola", ["Hello"])
+        data = vocab_db.backup_bytes(conn)
+        other = vocab_db.connect(":memory:")
+        vocab_db.restore_from_bytes(other, data)
+        assert vocab_db.add_meanings(other, "HOLA", ["hello"]) == 0  # keys still unique
+        vocab_db.delete_word(other, "Hola")
+        assert vocab_db.load_words(other) == {}
+        other.close()
+
+    @pytest.mark.parametrize("data", [b"", b"not a database at all", b"SQLite format 3\x00junk"])
+    def test_rejects_files_that_are_not_backups(self, conn, data):
+        vocab_db.add_meanings(conn, "Gato", ["Cat"])
+        conn.commit()
+        with pytest.raises(ValueError, match="isn't a Vocab Match backup"):
+            vocab_db.restore_from_bytes(conn, data)
+        assert vocab_db.load_words(conn) == {"Gato": ("Cat",)}
+
+    def test_rejects_other_sqlite_databases(self, conn):
+        other = sqlite3.connect(":memory:")
+        other.execute("CREATE TABLE something (x)")
+        data = other.serialize()
+        other.close()
+        with pytest.raises(ValueError):
+            vocab_db.restore_from_bytes(conn, data)
+
+    def test_older_backup_is_brought_up_to_date(self, conn):
+        old = sqlite3.connect(":memory:")
+        old.executescript(
+            """
+            CREATE TABLE words (id INTEGER PRIMARY KEY, spanish TEXT NOT NULL UNIQUE,
+                                last_seen TEXT);
+            CREATE TABLE meanings (word_id INTEGER NOT NULL, english TEXT NOT NULL,
+                                   PRIMARY KEY (word_id, english));
+            INSERT INTO words (id, spanish) VALUES (1, 'Hola');
+            INSERT INTO meanings VALUES (1, 'Hello');
+            """
+        )
+        data = old.serialize()
+        old.close()
+        assert vocab_db.restore_from_bytes(conn, data) == 1
+        assert vocab_db.load_words(conn) == {"Hola": ("Hello",)}
+        assert vocab_db.load_stats(conn, "Hola")["half_life_hours"] == 24.0
+
+
 class TestDeleteWord:
     def test_removes_word_meanings_and_history(self, conn):
         vocab_db.add_meanings(conn, "Banco", ["Bank", "Bench"])
@@ -836,7 +897,7 @@ class TestStartup:
 
     def test_upload_back_arrow_goes_to_vocab_screen(self, page):
         click(page, "Vocab management")
-        click(page, "Upload a vocabulary")
+        click(page, "Upload list via CSV")
         assert self.big_buttons(page) == []
         assert page.appbar.leading.icon == ft.Icons.ARROW_BACK
         assert page.appbar.leading.tooltip == "Back"
@@ -1643,7 +1704,7 @@ class TestVocabScreen:
         assert page.dialog.title.value == "Delete all 50 words?"
         warning = [c.value for c in page.dialog.content.controls]
         assert any("can't be undone" in t for t in warning)
-        assert any("Download list" in t for t in warning)
+        assert any("Backup database to file" in t for t in warning)
         assert len(main.WORDS) == 50
 
     def test_cancel_delete_all_keeps_the_list(self, db_file):
@@ -1691,6 +1752,127 @@ class TestVocabScreen:
         click(page, "Back to menu")
         assert not any(t.startswith("Add at least") for t in texts(page) if t)
 
+    def test_buttons_in_two_sections(self, page):
+        self.open(page)
+        layout = [
+            "---" if isinstance(c, ft.Divider) else c.content
+            for c in current_view(page).controls
+            if isinstance(c, (ft.Button, ft.Divider))
+        ]
+        assert layout == [
+            "Add word",
+            "Upload list via CSV",
+            "Download list as CSV",
+            "---",
+            "Backup database to file",
+            "Restore database from file",
+            "Delete all words",
+            "---",
+        ]
+        controls = current_view(page).controls
+        assert controls.index(find_first(page, ft.DataTable)) > max(
+            i for i, c in enumerate(controls) if isinstance(c, ft.Divider)
+        )
+
+    def test_backup_saves_the_whole_database(self, page, monkeypatch, db_file):
+        calls = {}
+
+        async def save_file(**kwargs):
+            calls.update(kwargs)
+            return "/somewhere/backup.db"
+
+        monkeypatch.setattr(page.services[0], "save_file", save_file)
+        self.open(page)
+        click(page, "Backup database to file")
+        assert calls["file_name"].startswith("vocab_match_backup_")
+        assert calls["file_name"].endswith(".db")
+        assert calls["allowed_extensions"] == ["db"]
+        other = vocab_db.connect(":memory:")
+        vocab_db.restore_from_bytes(other, calls["src_bytes"])
+        assert vocab_db.load_words(other) == main.WORDS
+        other.close()
+        assert "Backup saved to /somewhere/backup.db" in texts(page)
+
+    def test_backup_cancelled(self, page, monkeypatch):
+        async def save_file(**kwargs):
+            return None
+
+        monkeypatch.setattr(page.services[0], "save_file", save_file)
+        self.open(page)
+        click(page, "Backup database to file")
+        assert "Backup cancelled." in texts(page)
+
+    def restore_file(self, tmp_path, words, method="time"):
+        conn = vocab_db.connect(":memory:")
+        for word, meaning in words:
+            vocab_db.add_meanings(conn, word, [meaning])
+        vocab_db.set_setting(conn, "choice_method", method)
+        path = tmp_path / "backup.db"
+        path.write_bytes(vocab_db.backup_bytes(conn))
+        conn.close()
+        return path
+
+    def pick_restore(self, page, monkeypatch, path):
+        class Picked:
+            pass
+
+        picked = Picked()
+        picked.path = str(path)
+
+        async def pick_files(**kwargs):
+            assert kwargs["allowed_extensions"] == ["db"]
+            return [picked]
+
+        monkeypatch.setattr(page.services[0], "pick_files", pick_files)
+        click(page, "Restore database from file")
+
+    WORDS_IN_BACKUP = [("Uno", "One"), ("Dos", "Two"), ("Tres", "Three"),
+                       ("Cuatro", "Four"), ("Cinco", "Five"), ("Seis", "Six")]
+
+    def test_restore_small_list_without_warning(self, page, monkeypatch, tmp_path):
+        self.open(page)
+        self.pick_restore(page, monkeypatch, self.restore_file(tmp_path, self.WORDS_IN_BACKUP))
+        assert page.dialog is None
+        assert set(main.WORDS) == {w for w, _ in self.WORDS_IN_BACKUP}
+        assert sorted(table_words(page)) == sorted(main.WORDS)
+        assert "Restored the backup: 6 word(s)." in texts(page)
+
+    def test_restore_brings_back_settings(self, page, monkeypatch, tmp_path):
+        self.open(page)
+        self.pick_restore(
+            page, monkeypatch, self.restore_file(tmp_path, self.WORDS_IN_BACKUP, method="rank")
+        )
+        click(page, "Back to menu")
+        click(page, "Settings")
+        assert find_first(page, ft.RadioGroup).value == "rank"
+
+    def test_restore_warns_from_50_words(self, db_file, monkeypatch, tmp_path):
+        page = self.big_list(db_file)
+        self.open(page)
+        self.pick_restore(page, monkeypatch, self.restore_file(tmp_path, self.WORDS_IN_BACKUP))
+        assert page.dialog.title.value == "Replace your whole list?"
+        assert len(main.WORDS) == 50
+        self.dialog_click(page, "Cancel")
+        assert len(main.WORDS) == 50
+
+    def test_confirmed_restore_replaces_big_list(self, db_file, monkeypatch, tmp_path):
+        page = self.big_list(db_file)
+        self.open(page)
+        self.pick_restore(page, monkeypatch, self.restore_file(tmp_path, self.WORDS_IN_BACKUP))
+        self.dialog_click(page, "Restore")
+        assert len(main.WORDS) == 6
+        conn = vocab_db.connect(str(db_file))
+        assert vocab_db.count_words(conn) == 6
+        conn.close()
+
+    def test_restore_of_wrong_file_shows_message(self, page, monkeypatch, tmp_path):
+        bad = tmp_path / "notes.db"
+        bad.write_bytes(b"not a database")
+        self.open(page)
+        self.pick_restore(page, monkeypatch, bad)
+        assert "That file isn't a Vocab Match backup." in texts(page)
+        assert main.WORDS == main.SEED_WORDS
+
     def test_reopening_resets_search_and_form(self, page):
         self.open(page)
         self.search(page, "zzz")
@@ -1728,7 +1910,7 @@ class TestDownload:
 
         monkeypatch.setattr(picker, "save_file", save_file)
         click(page, "Vocab management")
-        click(page, "Download list")
+        click(page, "Download list as CSV")
 
         assert calls["file_name"] == "vocab_list.csv"
         assert calls["allowed_extensions"] == ["csv"]
@@ -1743,14 +1925,14 @@ class TestDownload:
 
         monkeypatch.setattr(page.services[0], "save_file", save_file)
         click(page, "Vocab management")
-        click(page, "Download list")
+        click(page, "Download list as CSV")
         assert "Download cancelled." in texts(page)
 
 
 class TestUpload:
     def open(self, page):
         click(page, "Vocab management")
-        click(page, "Upload a vocabulary")
+        click(page, "Upload list via CSV")
         assert heading(page) == "Upload a vocabulary"
 
     def checkbox(self, page):
@@ -1835,7 +2017,7 @@ class TestUpload:
         box = self.checkbox(page)
         box.value = False
         click(page, "Back")
-        click(page, "Upload a vocabulary")
+        click(page, "Upload list via CSV")
         assert self.checkbox(page).value is True
 
     def test_imports_file(self, page, monkeypatch, tmp_path):
@@ -1907,5 +2089,5 @@ class TestUpload:
         self.open(page)
         self.pick(page, monkeypatch, upload)
         click(page, "Back")
-        click(page, "Upload a vocabulary")
+        click(page, "Upload list via CSV")
         assert all(not t.startswith("Added") for t in texts(page) if t)

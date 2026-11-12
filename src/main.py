@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import os
 import random
 
@@ -542,7 +543,7 @@ def main(page: ft.Page):
                             weight=ft.FontWeight.BOLD,
                             color=ft.Colors.RED_700,
                         ),
-                        ft.Text("To keep a copy, use Download list first."),
+                        ft.Text("To keep a copy, use Backup database to file first."),
                     ],
                     tight=True,
                     spacing=10,
@@ -631,6 +632,69 @@ def main(page: ft.Page):
                 )
             )
         vocab_table.rows = rows
+        page.update()
+
+    async def backup_database(e=None):
+        path = await file_picker.save_file(
+            file_name=f"vocab_match_backup_{datetime.date.today().isoformat()}.db",
+            allowed_extensions=["db"],
+            src_bytes=vocab_db.backup_bytes(conn),
+        )
+        vocab_message.value = f"Backup saved to {path}" if path else "Backup cancelled."
+        page.update()
+
+    async def choose_restore_file(e=None):
+        files = await file_picker.pick_files(allow_multiple=False, allowed_extensions=["db"])
+        if not files:
+            return
+        with open(files[0].path, "rb") as f:
+            data = f.read()
+        if len(WORDS) < NEW_USER_WORDS:
+            restore(data)
+            return
+        page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                icon=ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color=ft.Colors.RED_700, size=48),
+                title=ft.Text("Replace your whole list?", text_align=ft.TextAlign.CENTER),
+                content=ft.Column(
+                    [
+                        ft.Text(
+                            f"Restoring replaces all {len(WORDS)} words, your practice "
+                            "history and your settings with the ones in the backup."
+                        ),
+                        ft.Text(
+                            "It can't be undone.",
+                            weight=ft.FontWeight.BOLD,
+                            color=ft.Colors.RED_700,
+                        ),
+                    ],
+                    tight=True,
+                    spacing=10,
+                ),
+                actions=[
+                    ft.TextButton("Cancel", on_click=lambda e: page.pop_dialog()),
+                    ft.TextButton(
+                        "Restore",
+                        on_click=lambda e: (page.pop_dialog(), restore(data)),
+                        style=ft.ButtonStyle(color=ft.Colors.RED_700),
+                    ),
+                ],
+            )
+        )
+
+    def restore(data):
+        try:
+            count = vocab_db.restore_from_bytes(conn, data)
+        except ValueError as err:
+            vocab_message.value = str(err)
+            page.update()
+            return
+        reload_words()
+        settings["choice_method"] = saved_choice_method()
+        refresh_table()
+        form.visible = False
+        vocab_message.value = f"Restored the backup: {count} word(s)."
         page.update()
 
     async def export_words(e=None):
@@ -762,23 +826,27 @@ def main(page: ft.Page):
         [
             ft.Text("Vocab management", size=30, weight=ft.FontWeight.BOLD),
             ft.Row([search_field]),
-            ft.Row(
-                [
-                    ft.Button("Add word", on_click=start_add),
-                    ft.Button("Upload a vocabulary", on_click=lambda e: show_upload()),
-                    ft.Button("Download list", on_click=export_words),
-                    ft.Button(
-                        "Delete all words",
-                        icon=ft.Icons.DELETE_FOREVER_OUTLINED,
-                        color=ft.Colors.RED_700,
-                        icon_color=ft.Colors.RED_700,
-                        on_click=ask_delete_all,
-                    ),
-                ],
-                wrap=True,
-                spacing=10,
-                alignment=ft.MainAxisAlignment.CENTER,
+            # The word list.
+            ft.Button("Add word", on_click=start_add, width=BUTTON_WIDTH),
+            ft.Button(
+                "Upload list via CSV", on_click=lambda e: show_upload(), width=BUTTON_WIDTH
             ),
+            ft.Button("Download list as CSV", on_click=export_words, width=BUTTON_WIDTH),
+            ft.Divider(),
+            # The whole database.
+            ft.Button("Backup database to file", on_click=backup_database, width=BUTTON_WIDTH),
+            ft.Button(
+                "Restore database from file", on_click=choose_restore_file, width=BUTTON_WIDTH
+            ),
+            ft.Button(
+                "Delete all words",
+                icon=ft.Icons.DELETE_FOREVER_OUTLINED,
+                color=ft.Colors.RED_700,
+                icon_color=ft.Colors.RED_700,
+                on_click=ask_delete_all,
+                width=BUTTON_WIDTH,
+            ),
+            ft.Divider(),
             vocab_message,
             form,
             vocab_table,

@@ -459,6 +459,45 @@ def import_text(conn, text, start_clean=False):
     return {"added": added, "skipped": skipped, "errors": errors, "removed": removed}
 
 
+def backup_bytes(conn):
+    """The whole database as bytes, for saving as a backup file.
+
+    Includes everything: words, meanings, practice history and settings.
+    """
+    conn.commit()
+    return conn.serialize()
+
+
+def restore_from_bytes(conn, data):
+    """Replace the whole database with a backup made by backup_bytes. Commits.
+
+    Older backups are brought up to date. Raises ValueError, and changes
+    nothing, if data isn't a Vocab Match backup. Returns how many words the
+    restored list has.
+    """
+    if not data:  # sqlite3 can't load an empty file (it raises MemoryError)
+        raise ValueError("That file isn't a Vocab Match backup.")
+    backup = sqlite3.connect(":memory:")
+    try:
+        try:
+            backup.deserialize(data)
+            tables = {
+                row[0]
+                for row in backup.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+        except sqlite3.DatabaseError:
+            raise ValueError("That file isn't a Vocab Match backup.") from None
+        if not {"words", "meanings"} <= tables:
+            raise ValueError("That file isn't a Vocab Match backup.")
+        conn.commit()
+        backup.backup(conn)
+    finally:
+        backup.close()
+    conn.executescript(SCHEMA)
+    migrate(conn)
+    return count_words(conn)
+
+
 def export_csv(conn):
     """Return the whole list as CSV rows of word,english, one per meaning."""
     words = load_words(conn)
